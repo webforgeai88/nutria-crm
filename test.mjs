@@ -1,0 +1,36 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+const child=spawn(process.execPath,['server.mjs'],{cwd:import.meta.dirname,env:{...process.env,PORT:'4174',NUTRIA_TEST:'1'},stdio:['ignore','pipe','pipe']});
+let ready=false;child.stdout.on('data',()=>{ready=true});await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw Error('Server failed to start')})]);
+function browser(){let jar={};return async(path,body)=>{let r=await fetch('http://127.0.0.1:4174/api/'+path,{method:body?'POST':'GET',headers:{cookie:Object.entries(jar).map(([k,v])=>k+'='+v).join('; '),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});for(let cookie of r.headers.getSetCookie()){let [k,v]=cookie.split(';')[0].split('=');jar[k]=v}return {status:r.status,data:await r.json()}}}
+test('End-to-end orders, permissions, persistence and isolated demos',async()=>{try{
+const a=browser(),b=browser();assert.equal((await a('public')).data.courses.length,4);
+assert.equal((await a('state')).status,401);
+assert.equal((await a('new-order',{name:'X',email:'x@example.com',courseId:1})).status,403);
+assert.equal((await a('login',{email:'admin@example.com',password:'bad'})).status,401);
+assert.equal((await a('demo',{role:'admin'})).status,200);
+const original=(await a('state')).data;assert.equal(original.orders.length,45);
+const checkout=await a('checkout',{name:'Тестовый клиент',email:'qa@example.com',courseId:1,consent:true,key:'qa-checkout'});assert.equal(checkout.status,200);let id=checkout.data.id;
+assert.equal((await a('checkout',{name:'Тестовый клиент',email:'qa@example.com',courseId:1,consent:true,key:'qa-checkout'})).data.id,id);
+let orders=(await a('state')).data.orders;assert.equal(orders.length,46);assert.equal(orders.find(o=>o.id===id).amount,790000);
+assert.equal((await a('order',{id,status:4})).status,400);
+assert.equal((await a('pay',{id,token:'wrong',success:true})).status,404);
+assert.equal((await a('pay',{id,token:checkout.data.paymentToken,success:true})).status,200);
+assert.equal((await a('order',{id,comment:'Договорились о старте обучения'})).status,200);
+let order=(await a('state')).data.orders.find(o=>o.id===id);assert.equal(order.paid,true);assert.equal(order.status,4);assert.equal(order.comments.at(-1).text,'Договорились о старте обучения');
+assert.equal((await a('order',{id,status:7})).status,400);assert.equal((await a('order',{id,status:7,reason:'Проверка сценария'})).status,200);
+assert.equal((await a('archive',{id,archived:true})).status,200);assert.equal((await a('state')).data.orders.find(o=>o.id===id).archived,true);
+assert.equal((await a('archive',{id,archived:false})).status,200);assert.equal((await a('state')).data.orders.find(o=>o.id===id).archived,false);
+let manual=await a('new-order',{name:'Ручной клиент',email:'manual@example.com',courseId:2,key:'manual-qa'});assert.equal(manual.status,200);let manualOrder=(await a('state')).data.orders.find(o=>o.id===manual.data.id);assert.equal(manualOrder.source,'Вручную');assert.equal(manualOrder.manager,'u0');
+assert.equal((await a('task',{orderId:id,title:'Связаться с клиентом',due:'2026-10-20'})).status,200);let task=(await a('state')).data.tasks.find(t=>t.orderId===id);assert.ok(task);assert.equal((await a('task',{id:task.id,done:true})).status,200);
+await b('demo',{role:'admin'});assert.equal((await b('state')).data.orders.length,45);assert.equal((await b('state')).data.orders.some(o=>o.checkoutKey==='qa-checkout'),false);
+await a('demo',{role:'limited'});let restricted=(await a('state')).data;assert.ok(restricted.orders.every(o=>o.manager==='u2'));assert.equal((await a('order',{id,comment:'Не должен сохраниться'})).status,404);assert.equal((await a('employee',{name:'X',email:'x@example.com',password:'SomePass2026'})).status,403);
+await a('demo',{role:'admin'});assert.equal((await a('employee',{name:'QA Сотрудник',email:'qa.employee@example.com',password:'Temporary2026!',scope:'own',permissions:{orders:1,clients:0,tasks:0,courses:0,analytics:0}})).status,200);
+let newUser=(await a('state')).data.users.find(u=>u.email==='qa.employee@example.com');assert.equal('password' in newUser,false);
+await a('login',{email:newUser.email,password:'Temporary2026!'});assert.equal((await a('state')).status,403);assert.equal((await a('password',{password:'ChangedPass2026!'})).status,200);assert.equal((await a('order',{id,comment:'Forbidden'})).status,403);
+await b('employee',{id:'u2',blocked:true});await b('demo',{role:'limited'}).then(r=>assert.equal(r.status,401));
+await a('demo',{role:'admin'});await a('employee',{id:newUser.id,blocked:true});assert.equal((await a('login',{email:newUser.email,password:'ChangedPass2026!'})).status,401);
+assert.equal((await a('reset',{})).status,200);assert.equal((await a('state')).status,401);await a('demo',{role:'admin'});assert.equal((await a('state')).data.orders.length,45);
+}finally{child.kill()}});

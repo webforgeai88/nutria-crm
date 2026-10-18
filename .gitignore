@@ -1,0 +1,10 @@
+data/
+*.log
+.env
+.env.*
+!.env.example
+node_modules/
+site-view.txt
+redesign.css
+*.pem
+*.key
